@@ -690,6 +690,11 @@ def get_redis_async_client(
     )
 
 
+SSL_CONNECTION_KWARGS: Final[frozenset[str]] = frozenset(
+    name for name in _init_arg_names(async_redis.SSLConnection) if name.startswith("ssl_")
+)
+
+
 def get_redis_connection_pool(
     **env_overrides,
 ) -> async_redis.BlockingConnectionPool | None:
@@ -726,7 +731,17 @@ def get_redis_connection_pool(
     elif redis_connect_func and hasattr(redis_connect_func, "_gcp_service_account"):
         redis_kwargs["credential_provider"] = GCPIAMCredentialProvider(redis_connect_func._gcp_service_account)
 
-    if redis_kwargs.pop("ssl", None):
+    ssl_enabled: Final = bool(redis_kwargs.pop("ssl", None))
+    supported_ssl_kwargs: Final = SSL_CONNECTION_KWARGS if ssl_enabled else frozenset[str]()
+    unsupported_ssl_kwargs: Final = tuple(
+        key
+        for key in redis_kwargs
+        if isinstance(key, str) and key.startswith("ssl_") and key not in supported_ssl_kwargs
+    )
+    for key in unsupported_ssl_kwargs:
+        redis_kwargs.pop(key)
+
+    if ssl_enabled:
         redis_kwargs["connection_class"] = async_redis.SSLConnection
     return async_redis.BlockingConnectionPool(timeout=REDIS_CONNECTION_POOL_TIMEOUT, **redis_kwargs)
 

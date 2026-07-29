@@ -1,4 +1,5 @@
 import json
+import ssl as ssl_module
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,11 +13,11 @@ from litellm._redis import (
     get_redis_connection_pool,
     get_redis_url_from_environment,
 )
-from litellm.constants import REDIS_CLUSTER_HEALTH_CHECK_INTERVAL
 from litellm._redis_credential_provider import (
     GCPIAMCredentialProvider,
     _token_cache,
 )
+from litellm.constants import REDIS_CLUSTER_HEALTH_CHECK_INTERVAL
 
 
 @pytest.fixture(autouse=True)
@@ -910,3 +911,53 @@ def test_url_allowlist_always_carries_socket_timeouts():
     allowed = _get_redis_url_kwargs()
     assert "socket_timeout" in allowed
     assert "socket_connect_timeout" in allowed
+
+
+def test_connection_pool_drops_ssl_kwargs_when_ssl_is_off(monkeypatch):
+    """
+    ssl_* values must not reach a plain Connection.
+
+    BlockingConnectionPool hands every kwarg to its connection class, and only
+    SSLConnection accepts ssl_*. The admin UI's cache settings form submits
+    ssl_check_hostname on every save, so leaving it in poisons the pool: each
+    connection it makes raises TypeError and all async Redis traffic fails.
+    """
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("REDIS_SSL", raising=False)
+    monkeypatch.delenv("REDIS_CLUSTER_NODES", raising=False)
+
+    pool = get_redis_connection_pool(
+        host="plain-redis.example.com",
+        port=6379,
+        ssl=False,
+        ssl_check_hostname=False,
+        ssl_cert_reqs=None,
+    )
+
+    assert pool is not None
+    assert pool.connection_class is async_redis.Connection
+    assert not [key for key in pool.connection_kwargs if key.startswith("ssl")]
+    assert isinstance(pool.make_connection(), async_redis.Connection)
+
+
+def test_connection_pool_keeps_ssl_kwargs_when_ssl_is_on(monkeypatch):
+    """ssl=True must still hand the ssl_* settings to the SSL connection."""
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("REDIS_SSL", raising=False)
+    monkeypatch.delenv("REDIS_CLUSTER_NODES", raising=False)
+
+    pool = get_redis_connection_pool(
+        host="tls-redis.example.com",
+        port=6380,
+        ssl=True,
+        ssl_check_hostname=True,
+        ssl_cert_reqs="required",
+    )
+
+    assert pool is not None
+    assert pool.connection_class is async_redis.SSLConnection
+
+    connection = pool.make_connection()
+    assert isinstance(connection, async_redis.SSLConnection)
+    assert connection.check_hostname is True
+    assert connection.cert_reqs == ssl_module.CERT_REQUIRED
